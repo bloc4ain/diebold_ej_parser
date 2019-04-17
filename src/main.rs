@@ -105,10 +105,6 @@ fn save_file(content: &str) {
     }
 }
 
-fn pause() {
-    io::stdin().read(&mut [0]).unwrap();
-}
-
 fn find() {
     let trace = read_trace();
     let path = read_path(
@@ -118,7 +114,6 @@ fn find() {
 
     if files.is_empty() {
         println!("Could not find electronic journal files in the directory!");
-        pause();
         return;
     }
 
@@ -127,7 +122,6 @@ fn find() {
     if !validate_journal_files(&files) {
         println!("Found journal logs for more than one terminal. Aborting.");
         println!("Ensure that the folder contains files from one terminal to prevent errors!");
-        pause();
         return;
     }
 
@@ -214,7 +208,6 @@ fn find() {
 
     if !txn_found {
         println!("Transaction with trace {} not found!", trace);
-        pause();
         return;
     }
 
@@ -251,7 +244,6 @@ fn find() {
         output.push_str("\n*******************************************************");
         save_file(&output);
     }
-    pause();
 }
 
 fn main() {
@@ -260,4 +252,5 @@ fn main() {
         println!("Fatal error occured. Please contact the application developer.");
         println!("{:?}", result);
     }
+    io::stdin().read(&mut [0]).unwrap();
 }
