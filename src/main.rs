@@ -6,6 +6,7 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::panic;
 use std::path::Path;
 use std::vec::Vec;
 
@@ -33,6 +34,10 @@ fn read_trace() -> String {
         let trace = stdin.lock().lines().next().unwrap().unwrap();
         if trace.is_empty() {
             println!("Empty trace entered!");
+            continue;
+        }
+        if !trace.parse::<i32>().is_ok() {
+            println!("Please enter a valid number!");
             continue;
         }
         return trace;
@@ -100,7 +105,11 @@ fn save_file(content: &str) {
     }
 }
 
-fn main() {
+fn pause() {
+    io::stdin().read(&mut [0]).unwrap();
+}
+
+fn find() {
     let trace = read_trace();
     let path = read_path(
         "Enter directory name containing journal logs (leave empty for current folder): ",
@@ -109,6 +118,7 @@ fn main() {
 
     if files.is_empty() {
         println!("Could not find electronic journal files in the directory!");
+        pause();
         return;
     }
 
@@ -117,6 +127,7 @@ fn main() {
     if !validate_journal_files(&files) {
         println!("Found journal logs for more than one terminal. Aborting.");
         println!("Ensure that the folder contains files from one terminal to prevent errors!");
+        pause();
         return;
     }
 
@@ -203,6 +214,7 @@ fn main() {
 
     if !txn_found {
         println!("Transaction with trace {} not found!", trace);
+        pause();
         return;
     }
 
@@ -217,10 +229,7 @@ fn main() {
             "Please include in the directory file for the day before {}",
             files.first().unwrap().date_time
         );
-        return;
-    }
-
-    if successful_cwd_after < TRANSACTION_RANGE || !card_sessions.last().unwrap().complete {
+    } else if successful_cwd_after < TRANSACTION_RANGE || !card_sessions.last().unwrap().complete {
         println!(
             "Unable to take {} later successful cash withdrawals",
             TRANSACTION_RANGE
@@ -229,20 +238,26 @@ fn main() {
             "Please include in the directory file for the day after {}",
             files.last().unwrap().date_time
         );
-        return;
+    } else {
+        let mut output = String::new();
+        output.push_str("*******************************************************\n");
+        output.push_str(
+            &card_sessions
+                .iter()
+                .map(|cs| cs.data.clone())
+                .collect::<Vec<String>>()
+                .join("\n*******************************************************\n"),
+        );
+        output.push_str("\n*******************************************************");
+        save_file(&output);
     }
+    pause();
+}
 
-    let mut output = String::new();
-    output.push_str("*******************************************************\n");
-    output.push_str(
-        &card_sessions
-            .iter()
-            .map(|cs| cs.data.clone())
-            .collect::<Vec<String>>()
-            .join("\n*******************************************************\n"),
-    );
-    output.push_str("\n*******************************************************");
-    save_file(&output);
-
-    io::stdin().read(&mut [0]).unwrap();
+fn main() {
+    let result = panic::catch_unwind(find);
+    if result.is_err() {
+        println!("Fatal error occured. Please contact the application developer.");
+        println!("{:?}", result);
+    }
 }
