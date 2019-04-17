@@ -5,13 +5,14 @@ use std::env;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::io::{BufRead, BufReader, Lines, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::vec::Vec;
 
 const TXN_SEP_REGEX: &str = r"\*{55}";
-const TRACE_REGEX: &str = r" TRACE     : (\d{6})";
-const SUCCESS_CWD_REGEX: &str = r"( RESP CODE : 00 \r*\n TRN TYPE  : CASH WITHDRAWAL)|( RESP CODE : 00 \r*\n TRN TYPE  : FAST CASH)";
+const SUCCESS_CWD_REGEX: &str = r" RESP CODE : 00 \r*\n TRN TYPE  : (CASH WITHDRAWAL|FAST CASH)";
+const FILE_NAME_REGEX: &str = r"(\d{8})-(\d{4}-\d{1,2}-\d{1,2}).txt$";
+const TRANSACTION_RANGE: i32 = 3;
 
 struct JournalFile {
     terminal_id: String,
@@ -19,119 +20,10 @@ struct JournalFile {
     path: String,
 }
 
-impl Clone for JournalFile {
-    fn clone(&self) -> JournalFile {
-        JournalFile {
-            terminal_id: self.terminal_id.clone(),
-            date_time: self.date_time.clone(),
-            path: self.path.clone(),
-        }
-    }
-}
-
-struct JournalIterator {
-    journals: Vec<JournalFile>,
-    iterator: Option<Lines<BufReader<File>>>,
-    current: usize,
-}
-
-impl JournalIterator {
-    pub fn new(files: Vec<JournalFile>) -> JournalIterator {
-        JournalIterator {
-            journals: files,
-            iterator: None,
-            current: 0,
-        }
-    }
-}
-
-impl Iterator for JournalIterator {
-    type Item = String;
-    fn next(&mut self) -> Option<String> {
-        let current = self.current;
-        let path = self.journals[current].path.clone();
-        let iterator = self.iterator.get_or_insert_with(|| {
-            let file_d = File::open(path).unwrap();
-            BufReader::new(file_d).lines()
-        });
-        match iterator.next() {
-            Some(line) => Some(line.unwrap()),
-            None => {
-                if self.current + 1 < self.journals.len() {
-                    self.current = self.current + 1;
-                    self.iterator = None;
-                    self.next()
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-
-struct Transaction {
-    text: String,
+struct CardSession {
+    data: String,
     complete: bool,
-    trace: Vec<String>,
     successful_cwd: bool,
-}
-
-struct TransactionIterator {
-    journal_iterator: JournalIterator,
-    trace_regex: Regex,
-    txn_sep_regex: Regex,
-    txn_success_regex: Regex,
-}
-
-impl TransactionIterator {
-    pub fn new(ji: JournalIterator) -> TransactionIterator {
-        TransactionIterator {
-            journal_iterator: ji,
-            trace_regex: Regex::new(TRACE_REGEX).unwrap(),
-            txn_sep_regex: Regex::new(TXN_SEP_REGEX).unwrap(),
-            txn_success_regex: Regex::new(SUCCESS_CWD_REGEX).unwrap(),
-        }
-    }
-}
-
-impl Iterator for TransactionIterator {
-    type Item = Transaction;
-    fn next(&mut self) -> Option<Transaction> {
-        let mut lines = Vec::new();
-        let mut sep_occurences = 0;
-        loop {
-            let next = self.journal_iterator.next();
-            if next.is_none() {
-                return None;
-            }
-            let line = next.unwrap();
-            if self.txn_sep_regex.is_match(&line) {
-                sep_occurences = sep_occurences + 1;
-                if lines.len() > 0 {
-                    break; // Transaction end
-                } else {
-                    continue; // Transaction start
-                }
-            }
-            lines.push(line);
-        }
-        if lines.len() == 0 {
-            return None;
-        }
-        let text = lines.join("\n");
-        let successful_cwd = self.txn_success_regex.is_match(&text);
-        let traces: Vec<String> = self
-            .trace_regex
-            .captures_iter(&text)
-            .map(|c| String::from(c.get(1).unwrap().as_str()))
-            .collect();
-        Some(Transaction {
-            text: lines.join("\n"),
-            complete: sep_occurences == 2,
-            trace: traces,
-            successful_cwd: successful_cwd,
-        })
-    }
 }
 
 fn read_trace() -> String {
@@ -166,15 +58,15 @@ fn read_path(msg: &str) -> String {
     }
 }
 
-fn get_files(path: String) -> Vec<JournalFile> {
+fn get_journal_files(path: String) -> Vec<JournalFile> {
     let paths = fs::read_dir(path).unwrap();
-    let re = Regex::new(r"(\d{8})-(\d{4}-\d{1,2}-\d{1,2}).txt$").unwrap();
-    let mut vec = Vec::new();
+    let re = Regex::new(FILE_NAME_REGEX).unwrap();
+    let mut files = Vec::new();
     for path in paths {
         let dir_entry = path.unwrap();
         let file_name = dir_entry.file_name().into_string().unwrap();
         match re.captures(&file_name) {
-            Some(cap) => vec.push(JournalFile {
+            Some(cap) => files.push(JournalFile {
                 terminal_id: String::from(&cap[1]),
                 date_time: String::from(&cap[2]),
                 path: dir_entry.path().into_os_string().into_string().unwrap(),
@@ -182,18 +74,18 @@ fn get_files(path: String) -> Vec<JournalFile> {
             None => {}
         }
     }
-    vec
+    files
 }
 
-fn group_by_tid(files: Vec<JournalFile>) -> HashMap<String, Vec<JournalFile>> {
-    let mut grouped_files: HashMap<String, Vec<JournalFile>> = HashMap::new();
+fn validate_journal_files(files: &Vec<JournalFile>) -> bool {
+    let mut hm = HashMap::new();
     for file in files {
-        grouped_files
-            .entry(file.terminal_id.clone())
-            .or_insert(Vec::new())
-            .push(file);
+        hm.insert(file.terminal_id.clone(), true);
+        if hm.len() > 1 {
+            return false;
+        }
     }
-    grouped_files
+    return true;
 }
 
 fn save_file(content: &str) {
@@ -213,60 +105,144 @@ fn main() {
     let path = read_path(
         "Enter directory name containing journal logs (leave empty for current folder): ",
     );
-    let files = get_files(String::from(path));
-    let mut grouped = group_by_tid(files);
+    let mut files = get_journal_files(String::from(path));
 
-    // iterate EJs files line by line for each terminal
-    for (terminal_id, files) in grouped.iter_mut() {
-        files.sort_by(|a, b| a.date_time.cmp(&b.date_time));
-        let journal_iterator = JournalIterator::new(files.to_vec());
-        let txn_iterator = TransactionIterator::new(journal_iterator);
-        let mut txns: Vec<Transaction> = Vec::new();
-        let mut found = false;
-        let mut before_counter = 0;
-        let mut after_counter = 0;
+    if files.is_empty() {
+        println!("Could not find electronic journal files in the directory!");
+        return;
+    }
 
-        for txn in txn_iterator {
-            if !found && before_counter > 3 {
-                while before_counter > 3 {
-                    if txns[0].successful_cwd {
-                        before_counter -= 1;
-                    }
-                    txns.remove(0);
+    // The folder must contain files from one terminal only
+    // Managing multiple terminals is complicated and requires more advanced logic
+    if !validate_journal_files(&files) {
+        println!("Found journal logs for more than one terminal. Aborting.");
+        println!("Ensure that the folder contains files from one terminal to prevent errors!");
+        return;
+    }
+
+    // We need the files ordered by date so we can traverse them line by line
+    // and be sure that if transaction is incomplete in the end of a file
+    // we will find the rest of it in the next file (if exist)
+    files.sort_by(|a, b| a.date_time.cmp(&b.date_time));
+
+    // Merge all files and treat them as one stream of lines
+    let lines = files
+        .iter()
+        .map(|file| File::open(file.path.clone()).unwrap())
+        .flat_map(|file| BufReader::new(file).lines())
+        .map(|line| line.unwrap());
+
+    let card_session_sep_re = Regex::new(TXN_SEP_REGEX).unwrap();
+    let txn_success_cwd_re = Regex::new(SUCCESS_CWD_REGEX).unwrap();
+    let txn_trace_re = Regex::new(&format!(" TRACE     : {}", trace)).unwrap();
+    let mut card_sessions = Vec::new();
+    let mut card_session_parts = Vec::new();
+    let mut card_session_started = false;
+    let mut txn_found = false;
+    let mut successful_cwd_before = 0;
+    let mut successful_cwd_after = 0;
+
+    for line in lines {
+        // If we did not hit start/end of card session we just push the line to the queue and
+        // continue collecting data
+        if !card_session_sep_re.is_match(&line) {
+            card_session_parts.push(line);
+            continue;
+        }
+
+        // Having no data collected means that we are in beginning of a session so
+        // we ignore it and continue collecting
+        if card_session_parts.is_empty() {
+            card_session_started = true;
+            continue;
+        }
+
+        // At this point we are at the end of a card session
+        // so we can proceed with our checks
+        let card_session = card_session_parts.join("\n");
+        // If we did not hit session separator yet,
+        // we cannot guarantee that the session is complete
+        let complete = card_session_started;
+        // We need to retrieve 3 card sessions that contain successful cash withdrawal
+        // so we test if the current session contains such
+        let successful_cwd = txn_success_cwd_re.is_match(&card_session);
+
+        if !txn_found && txn_trace_re.is_match(&card_session) {
+            // The next statement will increment the 'after' counter
+            // We don't want to count the match txn as 'after'
+            successful_cwd_after -= 1;
+            txn_found = true;
+        }
+        if !txn_found && successful_cwd {
+            successful_cwd_before += 1;
+        }
+        if txn_found && successful_cwd {
+            successful_cwd_after += 1;
+        }
+
+        card_sessions.push(CardSession {
+            data: card_session,
+            complete: complete,
+            successful_cwd: successful_cwd,
+        });
+        card_session_started = true;
+        card_session_parts.clear();
+
+        if txn_found && successful_cwd_after >= TRANSACTION_RANGE {
+            break;
+        }
+        if !txn_found && successful_cwd_before > TRANSACTION_RANGE {
+            // Cleanup unecesarry card sessions to save memory
+            while successful_cwd_before > TRANSACTION_RANGE {
+                if card_sessions.remove(0).successful_cwd {
+                    successful_cwd_before -= 1;
                 }
             }
-
-            found = found || txn.trace.contains(&String::from(trace.clone()));
-
-            if found && after_counter >= 3 {
-                break;
-            }
-            if found && txn.successful_cwd {
-                after_counter += 1;
-            }
-            if !found && txn.successful_cwd {
-                before_counter += 1;
-            }
-            txns.push(txn);
-        }
-
-        if !found {
-            println!("Transaction with trace {} not found!", trace);
-        } else {
-            println!(
-                "Transaction with trace #{} found for TID {}",
-                trace, terminal_id
-            );
-            let lines: Vec<String> = txns.iter().map(|t| t.text.clone()).collect();
-            let mut output = String::new();
-            output.push_str("*******************************************************\n");
-            output.push_str(
-                &lines.join("\n*******************************************************\n"),
-            );
-            output.push_str("*******************************************************");
-            save_file(&output);
         }
     }
+
+    if !txn_found {
+        println!("Transaction with trace {} not found!", trace);
+        return;
+    }
+
+    println!("Found transaction with trace {}", trace);
+
+    if successful_cwd_before < TRANSACTION_RANGE || !card_sessions.first().unwrap().complete {
+        println!(
+            "Unable to take {} previous successful cash withdrawals, have {}",
+            TRANSACTION_RANGE, successful_cwd_before
+        );
+        println!(
+            "Please include in the directory file for the day before {}",
+            files.first().unwrap().date_time
+        );
+        return;
+    }
+
+    if successful_cwd_after < TRANSACTION_RANGE || !card_sessions.last().unwrap().complete {
+        println!(
+            "Unable to take {} later successful cash withdrawals",
+            TRANSACTION_RANGE
+        );
+        println!(
+            "Please include in the directory file for the day after {}",
+            files.last().unwrap().date_time
+        );
+        return;
+    }
+
+    let mut output = String::new();
+    output.push_str("*******************************************************\n");
+    output.push_str(
+        &card_sessions
+            .iter()
+            .map(|cs| cs.data.clone())
+            .collect::<Vec<String>>()
+            .join("\n*******************************************************\n"),
+    );
+    output.push_str("\n*******************************************************");
+    save_file(&output);
 
     io::stdin().read(&mut [0]).unwrap();
 }
